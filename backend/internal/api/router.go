@@ -72,28 +72,31 @@ func (r *Router) SetupRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
 	})
 
-	// API version group
-	v1 := r.engine.Group("/api/v1")
+	// API version group - all main API routes are under /api/v1
+	r.apiV1 = r.engine.Group("/api/v1")
 
 	// Setup services
 	userService := services.NewUserService(r.db, r.logger)
 	projectService := services.NewProjectService(r.db, r.logger)
+	twinTypeService := services.NewTwinTypeService(r.db, r.logger)
 
 	// Setup controllers
 	authController := controllers.NewAuthController(userService, &r.config.JWT, r.logger)
 	userController := controllers.NewUserController(userService, r.logger)
 	projectController := controllers.NewProjectController(projectService, r.logger)
+	twinTypeController := controllers.NewTwinTypeController(twinTypeService, r.logger)
 
 	// Register auth routes (no auth required)
 	authController.RegisterRoutes(r.engine.Group("/api"))
 
 	// Routes that require authentication
-	authorizedRoutes := v1.Group("")
+	authorizedRoutes := r.apiV1.Group("")
 	authorizedRoutes.Use(r.authMiddleware.RequireAuth())
 
 	// Register routes that require authentication
 	userController.RegisterRoutes(authorizedRoutes)
 	projectController.RegisterRoutes(authorizedRoutes)
+	twinTypeController.RegisterRoutes(authorizedRoutes)
 
 	// Admin-only routes
 	adminRoutes := authorizedRoutes.Group("/admin")

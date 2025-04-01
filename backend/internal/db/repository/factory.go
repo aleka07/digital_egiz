@@ -8,6 +8,7 @@ type RepositoryFactory struct {
 	userRepo       UserRepository
 	projectRepo    ProjectRepository
 	twinRepo       TwinRepository
+	twinTypeRepo   TwinTypeRepository
 	mlRepo         MLRepository
 	timeseriesRepo TimeseriesRepository
 }
@@ -41,6 +42,14 @@ func (f *RepositoryFactory) Twin() TwinRepository {
 		f.twinRepo = NewTwinRepository(f.db)
 	}
 	return f.twinRepo
+}
+
+// TwinType returns the twin type repository
+func (f *RepositoryFactory) TwinType() TwinTypeRepository {
+	if f.twinTypeRepo == nil {
+		f.twinTypeRepo = NewTwinTypeRepository(f.db)
+	}
+	return f.twinTypeRepo
 }
 
 // ML returns the ML repository
