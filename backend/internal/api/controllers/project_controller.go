@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/digital-egiz/backend/internal/api/middleware"
 	"github.com/digital-egiz/backend/internal/db/models"
 	"github.com/digital-egiz/backend/internal/services"
 	"github.com/digital-egiz/backend/internal/utils"
@@ -73,19 +74,31 @@ func NewProjectController(projectService *services.ProjectService, logger *utils
 
 // RegisterRoutes registers the controller's routes with the router group
 func (pc *ProjectController) RegisterRoutes(router *gin.RouterGroup) {
+	// Create project middleware
+	projectAuth := middleware.NewProjectAuthMiddleware(pc.projectService)
+
 	projects := router.Group("/projects")
 	{
+		// Routes accessible to all authenticated users
 		projects.GET("", pc.ListProjects)
 		projects.POST("", pc.CreateProject)
-		projects.GET("/:id", pc.GetProject)
-		projects.PUT("/:id", pc.UpdateProject)
-		projects.DELETE("/:id", pc.DeleteProject)
 
-		// Project members
-		projects.GET("/:id/members", pc.ListMembers)
-		projects.POST("/:id/members", pc.AddMember)
-		projects.PUT("/:id/members/:user_id", pc.UpdateMember)
-		projects.DELETE("/:id/members/:user_id", pc.RemoveMember)
+		// Routes requiring specific project access
+		project := projects.Group("/:id")
+		{
+			// Viewer access required
+			project.GET("", projectAuth.RequireProjectViewer(), pc.GetProject)
+			project.GET("/members", projectAuth.RequireProjectViewer(), pc.ListMembers)
+
+			// Editor access required
+			project.PUT("", projectAuth.RequireProjectEditor(), pc.UpdateProject)
+
+			// Owner access required
+			project.DELETE("", projectAuth.RequireProjectOwner(), pc.DeleteProject)
+			project.POST("/members", projectAuth.RequireProjectOwner(), pc.AddMember)
+			project.PUT("/members/:user_id", projectAuth.RequireProjectOwner(), pc.UpdateMember)
+			project.DELETE("/members/:user_id", projectAuth.RequireProjectOwner(), pc.RemoveMember)
+		}
 	}
 }
 

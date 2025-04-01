@@ -254,3 +254,30 @@ func (s *ProjectService) RemoveMember(projectID, userID uint) error {
 
 	return nil
 }
+
+// CheckUserAccess checks if a user has the required access level for a project
+func (s *ProjectService) CheckUserAccess(projectID, userID uint, minRole models.ProjectRole) (bool, error) {
+	// Check if project exists
+	_, err := s.projectRepo.GetByID(projectID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return false, errors.New("project not found")
+		}
+		s.logger.Error("Failed to verify project exists",
+			zap.Uint("project_id", projectID),
+			zap.Error(err))
+		return false, errors.New("database error")
+	}
+
+	// Check user's access level
+	hasAccess, err := s.projectRepo.CheckUserAccess(projectID, userID, minRole)
+	if err != nil {
+		s.logger.Error("Failed to check user access to project",
+			zap.Uint("project_id", projectID),
+			zap.Uint("user_id", userID),
+			zap.Error(err))
+		return false, errors.New("failed to check project access")
+	}
+
+	return hasAccess, nil
+}
