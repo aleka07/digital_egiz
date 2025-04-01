@@ -10,15 +10,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/digital-egiz/backend/internal/api"
 	"github.com/digital-egiz/backend/internal/config"
+	"github.com/digital-egiz/backend/internal/db"
+	"github.com/digital-egiz/backend/internal/services"
 	"github.com/digital-egiz/backend/internal/utils"
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
 func main() {
 	// Parse command line flags
-	configPath := flag.String("config", "", "path to config file")
+	configPath := flag.String("config", "", "Path to the configuration directory")
 	flag.Parse()
 
 	// Load configuration
@@ -29,58 +31,45 @@ func main() {
 	}
 
 	// Initialize logger
-	logger, err := utils.NewLogger(&cfg.Logging)
+	logger, err := utils.NewLogger(&cfg.Log)
 	if err != nil {
 		fmt.Printf("Failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
 	defer logger.Sync()
 
-	// Set Gin mode based on logging configuration
-	if cfg.Logging.Production {
-		gin.SetMode(gin.ReleaseMode)
+	// Create context with cancellation for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up signal handling
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		logger.Info("Received signal, initiating shutdown", zap.String("signal", sig.String()))
+		cancel()
+	}()
+
+	// Initialize database
+	database, err := db.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		logger.Fatal("Failed to initialize database", zap.Error(err))
 	}
+	logger.Info("Database initialized")
 
-	// Initialize router
-	router := gin.New()
-	router.Use(gin.Recovery())
-	
-	// Add logger middleware
-	router.Use(func(c *gin.Context) {
-		start := time.Now()
-		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
+	// Initialize service provider
+	serviceProvider := services.NewServiceProvider(logger, cfg, database)
+	if err := serviceProvider.Initialize(ctx); err != nil {
+		logger.Fatal("Failed to initialize services", zap.Error(err))
+	}
+	logger.Info("Service provider initialized")
 
-		c.Next()
-
-		latency := time.Since(start)
-		clientIP := c.ClientIP()
-		method := c.Request.Method
-		statusCode := c.Writer.Status()
-
-		if raw != "" {
-			path = path + "?" + raw
-		}
-
-		logger.Info("request",
-			zap.String("path", path),
-			zap.String("method", method),
-			zap.Int("status", statusCode),
-			zap.String("ip", clientIP),
-			zap.Duration("latency", latency),
-		)
-	})
-
-	// Define a health check route
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status": "ok",
-			"service": "digital-egiz-backend",
-		})
-	})
+	// Create API router
+	router := api.NewRouter(logger, cfg, database, serviceProvider)
 
 	// Create HTTP server
-	serverAddr := fmt.Sprintf(":%d", cfg.Server.Port)
+	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	server := &http.Server{
 		Addr:         serverAddr,
 		Handler:      router,
@@ -93,24 +82,27 @@ func main() {
 	go func() {
 		logger.Info("Starting server", zap.String("address", serverAddr))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("Failed to start server", zap.Error(err))
+			logger.Fatal("Server error", zap.Error(err))
 		}
 	}()
 
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logger.Info("Shutting down server...")
+	// Wait for cancellation signal
+	<-ctx.Done()
+	logger.Info("Shutting down server")
 
-	// Create context with timeout for shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Create a timeout context for shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 
-	// Shutdown server gracefully
-	if err := server.Shutdown(ctx); err != nil {
-		logger.Fatal("Server forced to shutdown", zap.Error(err))
+	// Shutdown services
+	if err := serviceProvider.Shutdown(); err != nil {
+		logger.Error("Error during service shutdown", zap.Error(err))
 	}
 
-	logger.Info("Server exiting")
-} 
+	// Shutdown HTTP server
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("Error during server shutdown", zap.Error(err))
+	}
+
+	logger.Info("Server shutdown complete")
+}
