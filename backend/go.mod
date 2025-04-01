@@ -18,6 +18,7 @@ require (
 	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v20.10.24+incompatible // indirect
 	github.com/google/uuid v1.3.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/moby/term v0.5.0 // indirect
 	github.com/sirupsen/logrus v1.9.2 // indirect
 	golang.org/x/tools v0.9.1 // indirect
