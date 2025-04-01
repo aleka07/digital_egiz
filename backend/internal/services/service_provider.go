@@ -6,6 +6,7 @@ import (
 
 	"github.com/digital-egiz/backend/internal/config"
 	"github.com/digital-egiz/backend/internal/db"
+	"github.com/digital-egiz/backend/internal/db/repository"
 	"github.com/digital-egiz/backend/internal/ditto"
 	"github.com/digital-egiz/backend/internal/kafka"
 	"github.com/digital-egiz/backend/internal/utils"
@@ -14,12 +15,14 @@ import (
 
 // ServiceProvider manages all services for the application
 type ServiceProvider struct {
-	logger       *utils.Logger
-	config       *config.Config
-	database     *db.Database
-	kafkaManager *kafka.Manager
-	dittoManager *ditto.Manager
-	kafkaHandler *KafkaHandler
+	logger              *utils.Logger
+	config              *config.Config
+	database            *db.Database
+	kafkaManager        *kafka.Manager
+	dittoManager        *ditto.Manager
+	kafkaHandler        *KafkaHandler
+	historyService      *HistoryService
+	notificationService *NotificationService
 }
 
 // NewServiceProvider creates a new service provider
@@ -55,7 +58,15 @@ func (sp *ServiceProvider) Initialize(ctx context.Context) error {
 	}
 
 	// Create repository factory
-	repoFactory := db.NewRepositoryFactory(sp.database)
+	repoFactory := repository.NewRepositoryFactory(sp.database.DB)
+
+	// Initialize HistoryService
+	sp.historyService = NewHistoryService(sp.database, sp.logger)
+	sp.logger.Info("History service initialized")
+
+	// Initialize NotificationService
+	sp.notificationService = NewNotificationService(sp.logger)
+	sp.logger.Info("Notification service initialized")
 
 	// Initialize Kafka handler
 	sp.kafkaHandler = NewKafkaHandler(
@@ -124,4 +135,14 @@ func (sp *ServiceProvider) GetKafkaManager() *kafka.Manager {
 // GetKafkaHandler returns the Kafka handler
 func (sp *ServiceProvider) GetKafkaHandler() *KafkaHandler {
 	return sp.kafkaHandler
+}
+
+// GetHistoryService returns the history service
+func (sp *ServiceProvider) GetHistoryService() *HistoryService {
+	return sp.historyService
+}
+
+// GetNotificationService returns the notification service
+func (sp *ServiceProvider) GetNotificationService() *NotificationService {
+	return sp.notificationService
 }

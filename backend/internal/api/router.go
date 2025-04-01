@@ -17,13 +17,18 @@ import (
 
 // Router manages the API routes and controllers
 type Router struct {
-	engine          *gin.Engine
-	logger          *utils.Logger
-	config          *config.Config
-	authMiddleware  *middleware.AuthMiddleware
-	serviceProvider *services.ServiceProvider
-	db              *db.Database
-	apiV1           *gin.RouterGroup
+	engine             *gin.Engine
+	logger             *utils.Logger
+	config             *config.Config
+	authMiddleware     *middleware.AuthMiddleware
+	serviceProvider    *services.ServiceProvider
+	db                 *db.Database
+	apiV1              *gin.RouterGroup
+	userController     *controllers.UserController
+	projectController  *controllers.ProjectController
+	twinTypeController *controllers.TwinTypeController
+	twinController     *controllers.TwinController
+	historyController  *controllers.HistoryController
 }
 
 // NewRouter creates a new Router instance
@@ -79,12 +84,16 @@ func (r *Router) SetupRoutes() {
 	userService := services.NewUserService(r.db, r.logger)
 	projectService := services.NewProjectService(r.db, r.logger)
 	twinTypeService := services.NewTwinTypeService(r.db, r.logger)
+	twinService := services.NewTwinService(r.db, r.logger)
+	historyService := r.serviceProvider.GetHistoryService()
 
 	// Setup controllers
 	authController := controllers.NewAuthController(userService, &r.config.JWT, r.logger)
-	userController := controllers.NewUserController(userService, r.logger)
-	projectController := controllers.NewProjectController(projectService, r.logger)
-	twinTypeController := controllers.NewTwinTypeController(twinTypeService, r.logger)
+	r.userController = controllers.NewUserController(userService, r.logger)
+	r.projectController = controllers.NewProjectController(projectService, r.logger)
+	r.twinTypeController = controllers.NewTwinTypeController(twinTypeService, r.logger)
+	r.twinController = controllers.NewTwinController(twinService, r.logger)
+	r.historyController = controllers.NewHistoryController(historyService, r.logger)
 
 	// Register auth routes (no auth required)
 	authController.RegisterRoutes(r.engine.Group("/api"))
@@ -94,9 +103,17 @@ func (r *Router) SetupRoutes() {
 	authorizedRoutes.Use(r.authMiddleware.RequireAuth())
 
 	// Register routes that require authentication
-	userController.RegisterRoutes(authorizedRoutes)
-	projectController.RegisterRoutes(authorizedRoutes)
-	twinTypeController.RegisterRoutes(authorizedRoutes)
+	r.userController.RegisterRoutes(authorizedRoutes)
+	r.projectController.RegisterRoutes(authorizedRoutes)
+	r.twinTypeController.RegisterRoutes(authorizedRoutes)
+
+	// Group for twin endpoints
+	twinsRoutes := authorizedRoutes.Group("/twins")
+	r.twinController.RegisterRoutes(twinsRoutes)
+
+	// Register history routes under each twin
+	twinHistoryRoutes := twinsRoutes.Group("/:id/history")
+	r.historyController.RegisterRoutes(twinHistoryRoutes)
 
 	// Admin-only routes
 	adminRoutes := authorizedRoutes.Group("/admin")

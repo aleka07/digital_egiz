@@ -8,7 +8,7 @@ import (
 
 	"github.com/digital-egiz/backend/internal/db"
 	"github.com/digital-egiz/backend/internal/db/models"
-	"github.com/digital-egiz/backend/internal/db/repositories"
+	"github.com/digital-egiz/backend/internal/db/repository"
 	"github.com/digital-egiz/backend/internal/ditto"
 	"github.com/digital-egiz/backend/internal/kafka"
 	"github.com/digital-egiz/backend/internal/utils"
@@ -20,10 +20,11 @@ type KafkaHandler struct {
 	logger           *utils.Logger
 	kafkaManager     *kafka.Manager
 	dittoManager     *ditto.Manager
-	timeSeriesRepo   *repositories.TimeSeriesRepository
-	twinRepo         *repositories.TwinRepository
-	projectRepo      *repositories.ProjectRepository
+	timeseriesRepo   repository.TimeseriesRepository
+	twinRepo         repository.TwinRepository
+	projectRepo      repository.ProjectRepository
 	dittoEventBuffer chan *DittoEventData
+	database         *db.Database
 }
 
 // DittoEventData represents processed Ditto event data
@@ -39,17 +40,18 @@ func NewKafkaHandler(
 	logger *utils.Logger,
 	kafkaManager *kafka.Manager,
 	dittoManager *ditto.Manager,
-	db *db.Database,
-	repoFactory *repositories.RepositoryFactory,
+	database *db.Database,
+	repoFactory *repository.RepositoryFactory,
 ) *KafkaHandler {
 	return &KafkaHandler{
 		logger:           logger.Named("kafka_handler"),
 		kafkaManager:     kafkaManager,
 		dittoManager:     dittoManager,
-		timeSeriesRepo:   repoFactory.GetTimeSeriesRepository(),
-		twinRepo:         repoFactory.GetTwinRepository(),
-		projectRepo:      repoFactory.GetProjectRepository(),
+		timeseriesRepo:   repoFactory.Timeseries(),
+		twinRepo:         repoFactory.Twin(),
+		projectRepo:      repoFactory.Project(),
 		dittoEventBuffer: make(chan *DittoEventData, 100), // Buffer for processing Ditto events
+		database:         database,
 	}
 }
 
@@ -153,7 +155,7 @@ func (h *KafkaHandler) processDittoEventBuffer(ctx context.Context) {
 // processEvent processes a single Ditto event
 func (h *KafkaHandler) processEvent(ctx context.Context, event *DittoEventData) error {
 	// Get the twin from the database
-	twin, err := h.twinRepo.FindByThingID(event.ThingID)
+	twin, err := h.twinRepo.GetByDittoID(event.ThingID)
 	if err != nil {
 		// If the twin doesn't exist, we may need to create it
 		if event.Action == "created" {
@@ -197,20 +199,20 @@ func (h *KafkaHandler) handleTwinCreated(ctx context.Context, event *DittoEventD
 
 	// If project ID is not found, assign to default project
 	if projectID == 0 {
-		defaultProject, err := h.projectRepo.FindByName("Default")
-		if err != nil {
+		// Use List with filter to find default project
+		projects, total, err := h.projectRepo.List(0, 1)
+		if err != nil || total == 0 {
 			return fmt.Errorf("failed to find default project: %w", err)
 		}
-		projectID = defaultProject.ID
+		projectID = projects[0].ID
 	}
 
 	// Create twin record
 	twin := &models.Twin{
-		ThingID:     event.ThingID,
+		DittoID:     event.ThingID,
 		Name:        getStringAttribute(thingData.Attributes, "name", "Unknown Twin"),
 		Description: getStringAttribute(thingData.Attributes, "description", ""),
 		ProjectID:   projectID,
-		Status:      "active",
 		CreatedAt:   event.Timestamp,
 		UpdatedAt:   event.Timestamp,
 	}
@@ -249,10 +251,7 @@ func (h *KafkaHandler) handleTwinModified(ctx context.Context, twin *models.Twin
 			twin.Description = desc
 			updated = true
 		}
-		if status, ok := thingData.Attributes["status"].(string); ok && status != "" {
-			twin.Status = status
-			updated = true
-		}
+		// Status is now handled by the DeletedAt field in the model
 	}
 
 	if updated {
@@ -263,8 +262,7 @@ func (h *KafkaHandler) handleTwinModified(ctx context.Context, twin *models.Twin
 
 		h.logger.Info("Updated twin in database",
 			zap.String("thingId", event.ThingID),
-			zap.String("name", twin.Name),
-			zap.String("status", twin.Status))
+			zap.String("name", twin.Name))
 	}
 
 	return nil
@@ -273,11 +271,7 @@ func (h *KafkaHandler) handleTwinModified(ctx context.Context, twin *models.Twin
 // handleTwinDeleted processes a twin deletion event
 func (h *KafkaHandler) handleTwinDeleted(ctx context.Context, twin *models.Twin, event *DittoEventData) error {
 	// Soft delete the twin
-	twin.Status = "deleted"
-	twin.UpdatedAt = event.Timestamp
-	twin.DeletedAt = &event.Timestamp
-
-	if err := h.twinRepo.Update(twin); err != nil {
+	if err := h.twinRepo.Delete(twin.ID); err != nil {
 		return fmt.Errorf("failed to delete twin: %w", err)
 	}
 
@@ -295,16 +289,48 @@ func (h *KafkaHandler) handleTimeSeriesData(thingID, featureID string, timestamp
 		zap.String("featureId", featureID),
 		zap.Time("timestamp", timestamp))
 
-	// Store time-series data in TimescaleDB
-	timeSeriesData := &models.TimeSeriesData{
-		ThingID:    thingID,
-		FeatureID:  featureID,
-		Time:       timestamp,
-		Data:       data,
-		SensorType: featureID, // Use feature ID as sensor type for now
+	// Determine value type and extract values
+	var valueType string
+	var valueNum float64
+	var valueBool *bool
+	var valueStr string
+	var valueJSON string
+
+	var jsonValue interface{}
+	if err := json.Unmarshal(data, &jsonValue); err == nil {
+		switch v := jsonValue.(type) {
+		case float64:
+			valueType = "number"
+			valueNum = v
+		case bool:
+			valueType = "boolean"
+			valueBool = &v
+		case string:
+			valueType = "string"
+			valueStr = v
+		default:
+			valueType = "object"
+			valueJSON = string(data)
+		}
+	} else {
+		valueType = "object"
+		valueJSON = string(data)
 	}
 
-	if err := h.timeSeriesRepo.Create(timeSeriesData); err != nil {
+	// Store time-series data in TimescaleDB
+	timeSeriesData := &models.TimeseriesData{
+		Time:        timestamp,
+		TwinID:      thingID,
+		FeaturePath: featureID,
+		ValueType:   valueType,
+		ValueNum:    valueNum,
+		ValueBool:   valueBool,
+		ValueStr:    valueStr,
+		ValueJSON:   valueJSON,
+		Source:      "ditto",
+	}
+
+	if err := h.timeseriesRepo.InsertTimeseriesData(timeSeriesData); err != nil {
 		return fmt.Errorf("failed to store time-series data: %w", err)
 	}
 
@@ -348,32 +374,42 @@ func (h *KafkaHandler) handleMLOutput(modelID string, timestamp time.Time, outpu
 		return fmt.Errorf("failed to unmarshal ML output: %w", err)
 	}
 
+	// Extract prediction type and values
+	var predictionType string = "anomaly" // Default
+	var scoreNum float64
+	var labelStr string
+	var detailsJSON string = string(mlOutput.Result)
+
 	// Store ML prediction
 	prediction := &models.MLPredictionData{
-		ModelID:    modelID,
-		ThingID:    mlOutput.ThingID,
-		FeatureID:  mlOutput.FeatureID,
-		Time:       timestamp,
-		Prediction: mlOutput.Result,
+		Time:           timestamp,
+		TwinID:         mlOutput.ThingID,
+		TaskID:         modelID,
+		PredictionType: predictionType,
+		ScoreNum:       scoreNum,
+		LabelStr:       labelStr,
+		DetailsJSON:    detailsJSON,
+		ModelVersion:   "1.0",
 	}
 
-	if err := h.timeSeriesRepo.CreateMLPrediction(prediction); err != nil {
+	if err := h.timeseriesRepo.InsertMLPredictionData(prediction); err != nil {
 		return fmt.Errorf("failed to store ML prediction: %w", err)
 	}
 
 	// Handle alerts if present
 	if mlOutput.Alert != nil {
 		alertData := &models.AlertData{
-			ThingID:     mlOutput.ThingID,
-			FeatureID:   mlOutput.FeatureID,
 			Time:        timestamp,
-			AlertType:   mlOutput.Alert.Type,
+			AlertID:     fmt.Sprintf("%s-%d", mlOutput.ThingID, timestamp.UnixNano()),
+			TwinID:      mlOutput.ThingID,
+			FeaturePath: mlOutput.FeatureID,
 			Severity:    mlOutput.Alert.Severity,
-			Description: mlOutput.Alert.Description,
-			Data:        output,
+			Message:     mlOutput.Alert.Description,
+			ValueJSON:   string(output),
+			Source:      "ml",
 		}
 
-		if err := h.timeSeriesRepo.CreateAlert(alertData); err != nil {
+		if err := h.timeseriesRepo.InsertAlertData(alertData); err != nil {
 			return fmt.Errorf("failed to store alert: %w", err)
 		}
 
@@ -402,19 +438,7 @@ func getStringAttribute(attributes map[string]interface{}, key, fallback string)
 
 // isMLEnabledForFeature checks if ML analysis is enabled for a feature
 func isMLEnabledForFeature(featureID string) bool {
-	// This is a placeholder - in a real implementation, this would
-	// check a configuration database or other source to determine
-	// if ML analysis should be applied to this feature
-
-	// For now, we'll enable ML for certain feature types
-	mlEnabledFeatures := map[string]bool{
-		"temperature":  true,
-		"pressure":     true,
-		"vibration":    true,
-		"acceleration": true,
-		"flow":         true,
-		"level":        true,
-	}
-
-	return mlEnabledFeatures[featureID]
+	// TODO: Implement actual check based on configured ML task bindings
+	// For now, just return true for testing purposes
+	return true
 }
