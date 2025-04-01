@@ -1,0 +1,245 @@
+version: '3.8'
+
+# Common project networks for service communication
+networks:
+  frontend-network:
+    driver: bridge
+  backend-network:
+    driver: bridge
+  kafka-network:
+    driver: bridge
+  db-network:
+    driver: bridge
+
+# Persistent volumes for data storage
+volumes:
+  postgres-data:
+  timescaledb-data:
+  ditto-data:
+  kafka-data:
+  zookeeper-data:
+  mlflow-data:
+
+services:
+  # Eclipse Ditto - Digital Twin Platform
+  ditto:
+    image: eclipse/ditto:3.0.0
+    container_name: digital-egiz-ditto
+    networks:
+      - backend-network
+    environment:
+      - TZ=UTC
+      - INSTANCE_INDEX=1
+      - BIND_HOSTNAME=0.0.0.0
+      - ENABLE_DUMMY_AUTH=true
+      # Add additional configuration as needed
+    volumes:
+      - ditto-data:/var/ditto
+      - ./ditto:/opt/ditto/conf
+    ports:
+      - "8080:8080"  # Ditto HTTP API
+      - "8081:8081"  # Ditto Web Socket
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # PostgreSQL with TimescaleDB for metadata and time-series data
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: digital-egiz-postgres
+    networks:
+      - db-network
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_DB=digital_egiz
+      - TIMESCALEDB_TELEMETRY=off
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+      - ./postgres/conf:/etc/postgresql/postgresql.conf
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
+
+  # Zookeeper for Kafka coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: digital-egiz-zookeeper
+    networks:
+      - kafka-network
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+      - ZOOKEEPER_INIT_LIMIT=5
+      - ZOOKEEPER_SYNC_LIMIT=2
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-data:/var/lib/zookeeper/log
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Kafka for messaging backbone
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: digital-egiz-kafka
+    networks:
+      - kafka-network
+      - backend-network
+    depends_on:
+      - zookeeper
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_DELETE_TOPIC_ENABLE=true
+      - KAFKA_LOG_RETENTION_HOURS=24
+      - KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--list", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Go Backend service
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: digital-egiz-backend
+    networks:
+      - backend-network
+      - db-network
+      - kafka-network
+      - frontend-network
+    depends_on:
+      - postgres
+      - ditto
+      - kafka
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - DB_NAME=digital_egiz
+      - DITTO_HOST=ditto
+      - DITTO_PORT=8080
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=${JWT_SECRET:-changeme}
+      - PORT=8088
+      - GIN_MODE=release
+      - ML_SERVICE_URL=http://ml-service:8000
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Frontend React application
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: digital-egiz-frontend
+    depends_on:
+      - backend
+    volumes:
+      - ./nginx/conf:/etc/nginx/conf.d
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+  # Nginx as reverse proxy and for serving static files
+  nginx:
+    image: nginx:alpine
+    container_name: digital-egiz-nginx
+    networks:
+      - frontend-network
+    volumes:
+      - ./nginx/conf:/etc/nginx/conf.d
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+      - frontend
+      - ditto
+    restart: unless-stopped
+
+  # Placeholder ML service
+  ml-service:
+    build:
+      context: ../examples/ml-service
+      dockerfile: Dockerfile
+    container_name: digital-egiz-ml-service
+    networks:
+      - backend-network
+      - kafka-network
+    depends_on:
+      - kafka
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - PORT=8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # MLflow for ML model tracking
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.8.0
+    container_name: digital-egiz-mlflow
+    networks:
+      - backend-network
+      - db-network
+    depends_on:
+      - postgres
+    environment:
+      - MLFLOW_TRACKING_URI=postgresql://postgres:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mlflow
+      - MLFLOW_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow-data:/mlflow/artifacts
+    ports:
+      - "5000:5000"
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql://postgres:${POSTGRES_PASSWORD:-changeme}@postgres:5432/mlflow --default-artifact-root /mlflow/artifacts
+    restart: unless-stopped

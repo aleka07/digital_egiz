@@ -39,4 +39,49 @@ Thumbs.db
 
 # Logs
 *.log
-logs/ 
+logs/
+
+# Go specific
+/backend/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/backend/go.sum
+
+# React/Node.js specific
+/frontend/node_modules/
+/frontend/.pnp
+/frontend/.pnp.js
+/frontend/coverage/
+/frontend/build/
+/frontend/npm-debug.log*
+/frontend/yarn-debug.log*
+/frontend/yarn-error.log*
+/frontend/.env.local
+/frontend/.env.development.local
+/frontend/.env.test.local
+/frontend/.env.production.local
+
+# Environment and configuration files
+.env
+.env.*
+!.env.example
+docker/.env
+docker/.env.*
+!docker/.env.example
+
+# Build artifacts
+/dist/
+/build/
+/tmp/
+/temp/
+
+# Docker related
+.docker-data/
+
+# Temporary files
+*.tmp 

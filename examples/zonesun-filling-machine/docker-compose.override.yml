@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # Zonesun Filling Machine simulator
+  zonesun-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: digital-egiz-zonesun-simulator
+    networks:
+      - backend-network
+      - kafka-network
+    depends_on:
+      - kafka
+      - backend
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - SIMULATOR_INTERVAL=${ZONESUN_SIMULATOR_INTERVAL:-1000}
+      - BACKEND_URL=http://backend:8088
+    volumes:
+      - ./config:/app/config
+    restart: unless-stopped
+
+networks:
+  backend-network:
+    external: true
+  kafka-network:
+    external: true 

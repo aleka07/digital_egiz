@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # Eclipse Ditto - Development overrides
+  ditto:
+    environment:
+      - ENABLE_DUMMY_AUTH=true  # Ensure dummy auth is enabled for easy development
+      - DITTO_DEVOPS_SECURED=false  # Allow direct access to DevOps APIs for easy debugging
+      - DITTO_LOGGING_LOGSTASH_ENABLED=false  # Disable logstash in development
+    ports:
+      - "8080:8080"  # Ditto HTTP API
+      - "8081:8081"  # Ditto Web Socket API
+      - "8090:8090"  # Ditto DevOps API
+
+  # PostgreSQL with TimescaleDB - Development overrides
+  postgres:
+    ports:
+      - "5432:5432"  # Expose PostgreSQL port directly for development tools
+
+  # Kafka - Development overrides
+  kafka:
+    environment:
+      - KAFKA_LOG_RETENTION_HOURS=1  # Shorter retention for development
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true  # Auto create topics for faster development
+    ports:
+      - "9092:9092"
+      - "29092:29092"  # Expose additional port for local connection
+
+  # Backend service - Development overrides
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../backend:/app  # Mount source code for hot reloading
+    environment:
+      - GIN_MODE=debug  # Enable debug mode
+      - DEBUG=true  # Enable additional debug logs
+      - LOG_LEVEL=debug  # Verbose logging
+    command: ["go", "run", "cmd/server/main.go"]  # Run with go run for development
+    ports:
+      - "8088:8088"  # API
+      - "2345:2345"  # Delve debugger
+
+  # Frontend - Development overrides
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../frontend:/app  # Mount source code for hot reloading
+      - /app/node_modules  # Exclude node_modules from mounting
+    environment:
+      - NODE_ENV=development
+      - REACT_APP_API_URL=http://localhost:8088
+      - REACT_APP_DITTO_URL=http://localhost:8080
+      - CHOKIDAR_USEPOLLING=true  # Enable file watching in Docker
+    command: ["npm", "start"]  # Run development server
+    ports:
+      - "3000:3000"  # React dev server port
+
+  # ML service - Development overrides
+  ml-service:
+    build:
+      context: ../examples/ml-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../examples/ml-service:/app  # Mount source code for hot reloading
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=debug
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]  # Enable auto-reload
+
+  # MLflow - Development overrides
+  mlflow:
+    ports:
+      - "5000:5000"  # Expose MLflow UI directly
+
+  # Docker development utilities
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: digital-egiz-portainer
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  # Kafka management UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: digital-egiz-kafka-ui
+    depends_on:
+      - kafka
+      - zookeeper
+    ports:
+      - "8089:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=digital-egiz
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+    restart: unless-stopped
+
+volumes:
+  portainer-data:
