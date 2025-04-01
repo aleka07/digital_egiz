@@ -11,6 +11,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// TokenExpiredError is returned when the JWT token has expired
+var TokenExpiredError = errors.New("token_expired")
+
 // AuthMiddleware provides JWT authentication middleware for Gin
 type AuthMiddleware struct {
 	jwtConfig *config.JWTConfig
@@ -44,6 +47,13 @@ func (am *AuthMiddleware) RequireAuth() gin.HandlerFunc {
 		token := parts[1]
 		claims, err := validateToken(token, am.jwtConfig.Secret)
 		if err != nil {
+			if err == TokenExpiredError {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": "Token has expired",
+					"code":  "token_expired",
+				})
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
@@ -100,7 +110,7 @@ func validateToken(tokenString string, secretKey string) (*models.Claims, error)
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return nil, errors.New("token has expired")
+			return nil, TokenExpiredError
 		}
 		return nil, errors.New("invalid token")
 	}
@@ -110,4 +120,4 @@ func validateToken(tokenString string, secretKey string) (*models.Claims, error)
 	}
 
 	return claims, nil
-} 
+}
